@@ -188,7 +188,15 @@ function jsonErrorResponse(message: string, status: number) {
 // Send request with specific API key
 async function sendRequestWithKey(req: Request, key: string): Promise<Response> {
   const url = new URL(req.url);
-  const targetUrl = new URL(url.pathname + url.search, API_BASE_URL);
+  const targetUrl = new URL(url.pathname, API_BASE_URL);
+  
+  // Copy search params from original request, but replace 'key' with our API key
+  for (const [k, v] of url.searchParams) {
+    if (k !== 'key') {
+      targetUrl.searchParams.set(k, v);
+    }
+  }
+  targetUrl.searchParams.set('key', key);
 
   const fHeaders = new Headers();
   const ignoreHeaders = ['host', 'x-goog-api-key', 'cookie', 'authorization'];
@@ -201,8 +209,6 @@ async function sendRequestWithKey(req: Request, key: string): Promise<Response> 
   if (!fHeaders.has('content-type') && req.headers.has('content-type')) {
     fHeaders.set('content-type', req.headers.get('content-type')!);
   }
-
-  fHeaders.set('x-goog-api-key', key);
   
   const state = KEYS_STATES[key];
   state.activeRequests++;
@@ -269,7 +275,7 @@ Deno.serve(async (req) => {
   const preferJson = wantsJson(req);
   
   // Validate access token with rate limiting
-  const accessToken = req.headers.get('x-goog-api-key');
+  const accessToken = new URL(req.url).searchParams.get('key');
   const authResult = validateAccessToken(accessToken, clientIp);
   
   if (authResult.rateLimited) {
