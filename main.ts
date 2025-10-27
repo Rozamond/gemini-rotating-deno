@@ -187,7 +187,9 @@ function jsonErrorResponse(message: string, status: number) {
 // Send request with specific API key
 async function sendRequestWithKey(req: Request, key: string): Promise<Response> {
   const url = new URL(req.url);
-  const targetUrl = new URL(url.pathname, DEFAULT_BASE);
+  // Remove leading slashes to prevent protocol-relative URL interpretation
+  const pathname = url.pathname.replace(/^\/+/, '/');
+  const targetUrl = new URL(pathname, DEFAULT_BASE);
   
   // Copy search params from original request, but replace 'key' with our API key
   for (const [k, v] of url.searchParams) {
