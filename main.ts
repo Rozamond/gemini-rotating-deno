@@ -210,31 +210,270 @@ async function printHomeHtml(message?: string): Promise<string> {
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Reimu~ API Proxy</title>
+    <title>🌸 Hakurei Shrine API Gateway 🌸</title>
     <style>
-      body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #00ff00; }
-      h1 { color: #00ff00; }
-      pre { background: #000; padding: 15px; border-radius: 5px; overflow-x: auto; }
-      .error { color: #ff5555; font-weight: bold; }
-      .warning { color: #ffaa00; font-weight: bold; }
-      .status { margin: 20px 0; }
+      @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+JP:wght@400;600&display=swap');
+      
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      
+      body {
+        font-family: 'Noto Serif JP', serif;
+        background: linear-gradient(135deg, #f5e6d3 0%, #e8d5c4 50%, #d4c4b0 100%);
+        color: #3d2817;
+        min-height: 100vh;
+        padding: 20px;
+        position: relative;
+        overflow-x: hidden;
+      }
+      
+      body::before {
+        content: '';
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: 
+          radial-gradient(circle at 20% 30%, rgba(255, 182, 193, 0.1) 0%, transparent 50%),
+          radial-gradient(circle at 80% 70%, rgba(255, 218, 185, 0.1) 0%, transparent 50%);
+        pointer-events: none;
+        z-index: 0;
+      }
+      
+      .container {
+        max-width: 900px;
+        margin: 0 auto;
+        position: relative;
+        z-index: 1;
+      }
+      
+      .shrine-header {
+        text-align: center;
+        padding: 30px 20px;
+        background: linear-gradient(to bottom, rgba(139, 0, 0, 0.15), transparent);
+        border-radius: 15px 15px 0 0;
+        border: 3px solid #8b0000;
+        border-bottom: none;
+        box-shadow: 0 -5px 15px rgba(139, 0, 0, 0.1);
+      }
+      
+      h1 {
+        font-size: 2.5em;
+        color: #8b0000;
+        text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.1);
+        margin-bottom: 10px;
+        font-weight: 600;
+      }
+      
+      .subtitle {
+        color: #654321;
+        font-size: 1.1em;
+        font-style: italic;
+        opacity: 0.9;
+      }
+      
+      .main-content {
+        background: rgba(255, 248, 240, 0.95);
+        border: 3px solid #8b0000;
+        border-radius: 0 0 15px 15px;
+        padding: 30px;
+        box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15);
+        backdrop-filter: blur(10px);
+      }
+      
+      .shrine-torii {
+        text-align: center;
+        font-size: 3em;
+        margin: 20px 0;
+        color: #8b0000;
+        text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.2);
+      }
+      
+      .warning-box, .error-box {
+        padding: 15px 20px;
+        margin: 20px 0;
+        border-radius: 8px;
+        border-left: 5px solid;
+        background: rgba(255, 255, 255, 0.6);
+      }
+      
+      .warning-box {
+        border-left-color: #ff8c00;
+        color: #cc6600;
+        background: rgba(255, 245, 230, 0.9);
+      }
+      
+      .error-box {
+        border-left-color: #dc143c;
+        color: #8b0000;
+        background: rgba(255, 240, 240, 0.9);
+        font-weight: 600;
+      }
+      
+      .status-section {
+        margin: 25px 0;
+      }
+      
+      h2, h3 {
+        color: #8b0000;
+        margin: 20px 0 15px 0;
+        padding-bottom: 10px;
+        border-bottom: 2px solid rgba(139, 0, 0, 0.2);
+        font-weight: 600;
+      }
+      
+      pre {
+        background: linear-gradient(135deg, #2d1810 0%, #1a0f0a 100%);
+        color: #ffcc99;
+        padding: 20px;
+        border-radius: 8px;
+        overflow-x: auto;
+        border: 2px solid #8b4513;
+        box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.3);
+        font-family: 'Courier New', monospace;
+        line-height: 1.6;
+      }
+      
+      .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+        gap: 15px;
+        margin: 20px 0;
+      }
+      
+      .stat-card {
+        background: linear-gradient(135deg, rgba(255, 255, 255, 0.8), rgba(255, 248, 240, 0.8));
+        padding: 20px;
+        border-radius: 10px;
+        border: 2px solid rgba(139, 0, 0, 0.3);
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+        transition: transform 0.2s ease;
+      }
+      
+      .stat-card:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 6px 15px rgba(0, 0, 0, 0.15);
+      }
+      
+      .stat-label {
+        color: #654321;
+        font-size: 0.9em;
+        margin-bottom: 8px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+      }
+      
+      .stat-value {
+        color: #8b0000;
+        font-size: 2em;
+        font-weight: 600;
+      }
+      
+      .cherry-blossoms {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        z-index: 999;
+        overflow: hidden;
+      }
+      
+      .petal {
+        position: absolute;
+        width: 10px;
+        height: 10px;
+        background: radial-gradient(circle, #ffb7c5 0%, #ffc0cb 50%, transparent 100%);
+        border-radius: 50% 0 50% 0;
+        opacity: 0.7;
+        animation: fall linear infinite;
+      }
+      
+      @keyframes fall {
+        0% {
+          transform: translateY(-10vh) rotate(0deg);
+          opacity: 0.7;
+        }
+        100% {
+          transform: translateY(110vh) rotate(360deg);
+          opacity: 0;
+        }
+      }
+      
+      .footer {
+        text-align: center;
+        margin-top: 30px;
+        padding: 20px;
+        color: #654321;
+        font-style: italic;
+        opacity: 0.8;
+      }
     </style>
   </head>
   <body>
-    <h1>🌸 Reimu~ API Proxy 🌸</h1>
-    ${!hasKeys ? '<div class="warning">⚠️ WARNING: No API keys configured! Set API_KEYS environment variable.</div>' : ''}
-    <div class="status">
-      <h2>Key Status:</h2>
-      <pre>${keyStates}</pre>
+    <div class="cherry-blossoms">
+      <div class="petal" style="left: 10%; animation-duration: 12s; animation-delay: 0s;"></div>
+      <div class="petal" style="left: 25%; animation-duration: 15s; animation-delay: 2s;"></div>
+      <div class="petal" style="left: 40%; animation-duration: 13s; animation-delay: 4s;"></div>
+      <div class="petal" style="left: 55%; animation-duration: 14s; animation-delay: 1s;"></div>
+      <div class="petal" style="left: 70%; animation-duration: 16s; animation-delay: 3s;"></div>
+      <div class="petal" style="left: 85%; animation-duration: 12s; animation-delay: 5s;"></div>
     </div>
-    ${message ? `<p class="error">${message}</p>` : ''}
-    <div>
-      <h3>Stats:</h3>
-      <ul>
-        <li>Total Keys: ${API_KEYS.length}</li>
-        <li>Max Concurrent/Key: ${MAX_CONCURRENT_PER_KEY}</li>
-        <li>Rate Limits: ${RPM_LIMIT} RPM, ${RPD_LIMIT} RPD, ${TPM_LIMIT} TPM</li>
-      </ul>
+    
+    <div class="container">
+      <div class="shrine-header">
+        <h1>⛩️ 博麗神社 API Gateway ⛩️</h1>
+        <div class="subtitle">Hakurei Shrine • Where Boundaries Meet Technology</div>
+      </div>
+      
+      <div class="main-content">
+        <div class="shrine-torii">🌸 🏮 🌸</div>
+        
+        ${!hasKeys ? '<div class="warning-box">⚠️ WARNING: The shrine\'s spiritual barriers are down! No API keys configured. Set API_KEYS environment variable to restore protection.</div>' : ''}
+        
+        ${message ? `<div class="error-box">⚠️ ${message}</div>` : ''}
+        
+        <div class="status-section">
+          <h2>📜 Spiritual Barrier Status</h2>
+          <pre>${keyStates}</pre>
+        </div>
+        
+        <div class="status-section">
+          <h3>📊 Shrine Statistics</h3>
+          <div class="stats-grid">
+            <div class="stat-card">
+              <div class="stat-label">🔑 Guardian Keys</div>
+              <div class="stat-value">${API_KEYS.length}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">⚡ Concurrent Requests</div>
+              <div class="stat-value">${MAX_CONCURRENT_PER_KEY}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">🕐 Requests/Minute</div>
+              <div class="stat-value">${RPM_LIMIT}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">📅 Requests/Day</div>
+              <div class="stat-value">${RPD_LIMIT}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">🎴 Tokens/Minute</div>
+              <div class="stat-value">${(TPM_LIMIT / 1000).toFixed(0)}k</div>
+            </div>
+          </div>
+        </div>
+        
+        <div class="footer">
+          <p>💫 May your requests find fortune at the shrine 💫</p>
+          <p style="font-size: 0.9em; margin-top: 10px;">Maintained by Reimu Hakurei</p>
+        </div>
+      </div>
     </div>
   </body>
   </html>
