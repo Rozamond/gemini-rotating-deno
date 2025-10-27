@@ -255,6 +255,16 @@ function wantsJson(req: Request): boolean {
 
 // Main request handler
 Deno.serve(async (req) => {
+  const url = new URL(req.url);
+  
+  // Homepage - don't send to API
+  if (url.pathname === '/') {
+    return new Response(printHomeHtml(), { 
+      status: 200, 
+      headers: { 'Content-Type': 'text/html' } 
+    });
+  }
+  
   const clientIp = getClientIp(req);
   const preferJson = wantsJson(req);
   
