@@ -1,5 +1,5 @@
 // Configuration
-const API_KEYS = Deno.env.toObject().API_KEYS?.split(',')?.map(key => key.trim()) || [];
+const API_KEYS = Deno.env.toObject().GEMINI_API_KEYS?.split(',')?.map(key => key.trim()) || [];
 const DEFAULT_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 const API_BASE_URL = Deno.env.get('API_BASE_URL') || DEFAULT_BASE;
 const ACCESS_TOKEN = Deno.env.get('ACCESS_TOKEN');
