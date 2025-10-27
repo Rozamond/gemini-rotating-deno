@@ -4,24 +4,48 @@ const DEFAULT_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 const ACCESS_TOKEN = Deno.env.get('ACCESS_TOKEN');
 
 // Constants for rate limiting and backoff
-const SLIDING_WINDOW_MS = 60 * 60 * 1000; // 1 hour
-const MAX_CONCURRENT_PER_KEY = 5;
+// Gemini 2.5 Pro Free Tier Limits:
+// RPM: 5 (Request Per Minute)
+// TPM: 125k (Token Per Minute)
+// RPD: 100 (Request Per Day)
+// Note: Requests per day (RPD) quotas reset at midnight Pacific time.
+const RPM_LIMIT = 5; // Requests per minute
+const RPD_LIMIT = 100; // Requests per day (resets at midnight Pacific)
+const TPM_LIMIT = 125000; // Tokens per minute
+const MINUTE_MS = 60 * 1000;
+const MAX_CONCURRENT_PER_KEY = 2; // Conservative limit to avoid bursting
 const BACKOFF_LEVELS = [60 * 1000, 5 * 60 * 1000, 15 * 60 * 1000, 60 * 60 * 1000, 24 * 60 * 60 * 1000]; // 1min, 5min, 15min, 1hr, 24hr
 const MAX_AUTH_ATTEMPTS = 10;
 const AUTH_WINDOW_MS = 60 * 1000; // 1 minute
 
 // Enhanced state tracking
 interface KeyState {
-  requestTimestamps: number[];  // Sliding window of request times
-  activeRequests: number;       // Current concurrent requests
+  requestTimestampsMinute: number[];  // Sliding window for RPM (last minute)
+  requestCountDay: number;            // Count of requests since last midnight Pacific
+  lastDailyReset: number;             // Timestamp of last daily reset (midnight Pacific)
+  activeRequests: number;             // Current concurrent requests
   blocked: boolean;
   blockUntil: number;
-  failureCount: number;         // Consecutive failures for exponential backoff
+  failureCount: number;               // Consecutive failures for exponential backoff
+}
+
+// Check if daily reset should occur (midnight Pacific has passed)
+function shouldResetDaily(lastReset: number): boolean {
+  const now = new Date();
+  const pacificNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
+  const lastResetPacific = new Date(new Date(lastReset).toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
+  
+  // Check if we've crossed midnight Pacific
+  return pacificNow.getDate() !== lastResetPacific.getDate() || 
+         pacificNow.getMonth() !== lastResetPacific.getMonth() ||
+         pacificNow.getFullYear() !== lastResetPacific.getFullYear();
 }
 
 const KEYS_STATES = API_KEYS.reduce((acc, key) => {
   acc[key] = {
-    requestTimestamps: [],
+    requestTimestampsMinute: [],
+    requestCountDay: 0,
+    lastDailyReset: Date.now(),
     activeRequests: 0,
     blocked: false,
     blockUntil: 0,
@@ -57,29 +81,43 @@ function getKey(): string | null {
       state.failureCount = 0;
       log('info', `Key unblocked after backoff period`, { key: key.slice(0, 5) });
     }
-    // Clean old timestamps
-    state.requestTimestamps = cleanSlidingWindow(state.requestTimestamps, SLIDING_WINDOW_MS);
+    // Clean old timestamps for minute window
+    state.requestTimestampsMinute = cleanSlidingWindow(state.requestTimestampsMinute, MINUTE_MS);
+    
+    // Reset daily counter if midnight Pacific has passed
+    if (shouldResetDaily(state.lastDailyReset)) {
+      state.requestCountDay = 0;
+      state.lastDailyReset = now;
+      log('info', `Daily quota reset at midnight Pacific`, { key: key.slice(0, 5) });
+    }
   }
 
-  // Find available keys (not blocked, under concurrency limit)
+  // Find available keys (not blocked, under all limits)
   const availableKeys = API_KEYS.filter(key => {
     const state = KEYS_STATES[key];
-    return !state.blocked && state.activeRequests < MAX_CONCURRENT_PER_KEY;
+    return !state.blocked && 
+           state.activeRequests < MAX_CONCURRENT_PER_KEY &&
+           state.requestTimestampsMinute.length < RPM_LIMIT &&
+           state.requestCountDay < RPD_LIMIT;
   });
 
   if (availableKeys.length === 0) {
     return null;
   }
 
-  // Weighted selection: prefer keys with fewer requests in the sliding window
+  // Weighted selection: prefer keys with fewer requests in the day
   availableKeys.sort((a, b) => {
     const stateA = KEYS_STATES[a];
     const stateB = KEYS_STATES[b];
-    // Primary: fewer requests in window
-    if (stateA.requestTimestamps.length !== stateB.requestTimestamps.length) {
-      return stateA.requestTimestamps.length - stateB.requestTimestamps.length;
+    // Primary: fewer requests in day
+    if (stateA.requestCountDay !== stateB.requestCountDay) {
+      return stateA.requestCountDay - stateB.requestCountDay;
     }
-    // Secondary: fewer active concurrent requests
+    // Secondary: fewer requests in minute window
+    if (stateA.requestTimestampsMinute.length !== stateB.requestTimestampsMinute.length) {
+      return stateA.requestTimestampsMinute.length - stateB.requestTimestampsMinute.length;
+    }
+    // Tertiary: fewer active concurrent requests
     return stateA.activeRequests - stateB.activeRequests;
   });
 
@@ -121,9 +159,10 @@ function printKeyStates() {
   }
   
   return Object.entries(KEYS_STATES).map(([key, state]) => {
-    const requestsInWindow = state.requestTimestamps.length;
+    const requestsPerMinute = state.requestTimestampsMinute.length;
+    const requestsPerDay = state.requestCountDay;
     const blockStatus = state.blocked ? `BLOCKED until ${new Date(state.blockUntil).toLocaleTimeString()}` : 'ACTIVE';
-    return `${key.slice(0, 7)}... -> [requests/hour: ${requestsInWindow}, active: ${state.activeRequests}/${MAX_CONCURRENT_PER_KEY}, status: ${blockStatus}]`;
+    return `${key.slice(0, 7)}... -> [RPM: ${requestsPerMinute}/${RPM_LIMIT}, RPD: ${requestsPerDay}/${RPD_LIMIT}, active: ${state.activeRequests}/${MAX_CONCURRENT_PER_KEY}, status: ${blockStatus}]`;
   }).join('\n');
 }
 
@@ -159,7 +198,7 @@ function printHomeHtml(message?: string) {
       <ul>
         <li>Total Keys: ${API_KEYS.length}</li>
         <li>Max Concurrent/Key: ${MAX_CONCURRENT_PER_KEY}</li>
-        <li>Sliding Window: ${SLIDING_WINDOW_MS / 1000 / 60} minutes</li>
+        <li>Rate Limits: ${RPM_LIMIT} RPM, ${RPD_LIMIT} RPD, ${TPM_LIMIT} TPM</li>
       </ul>
     </div>
   </body>
@@ -363,15 +402,18 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Success - track the request in sliding window
+    // Success - track the request in minute window and increment daily counter
     const state = KEYS_STATES[currentKey];
-    state.requestTimestamps.push(Date.now());
+    const now = Date.now();
+    state.requestTimestampsMinute.push(now);
+    state.requestCountDay++;
     
     log('info', 'Request successful', {
       key: currentKey.slice(0, 7),
       attempts,
       status: response.status,
-      requestsInWindow: state.requestTimestamps.length,
+      rpm: state.requestTimestampsMinute.length,
+      rpd: state.requestCountDay,
     });
 
     const resHeaders = new Headers(response.headers);
@@ -401,5 +443,7 @@ if (API_KEYS.length === 0) {
 log('info', 'Gemini API Proxy started', {
   totalKeys: API_KEYS.length,
   maxConcurrentPerKey: MAX_CONCURRENT_PER_KEY,
-  slidingWindowMinutes: SLIDING_WINDOW_MS / 60000,
+  rpmLimit: RPM_LIMIT,
+  rpdLimit: RPD_LIMIT,
+  tpmLimit: TPM_LIMIT,
 });
