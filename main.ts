@@ -1,7 +1,6 @@
 // Configuration
 const API_KEYS = Deno.env.toObject().GEMINI_API_KEYS?.split(',')?.map(key => key.trim()) || [];
 const DEFAULT_BASE = 'https://generativelanguage.googleapis.com/v1beta';
-const API_BASE_URL = Deno.env.get('API_BASE_URL') || DEFAULT_BASE;
 const ACCESS_TOKEN = Deno.env.get('ACCESS_TOKEN');
 
 // Constants for rate limiting and backoff
@@ -188,7 +187,7 @@ function jsonErrorResponse(message: string, status: number) {
 // Send request with specific API key
 async function sendRequestWithKey(req: Request, key: string): Promise<Response> {
   const url = new URL(req.url);
-  const targetUrl = new URL(url.pathname, API_BASE_URL);
+  const targetUrl = new URL(url.pathname, DEFAULT_BASE);
   
   // Copy search params from original request, but replace 'key' with our API key
   for (const [k, v] of url.searchParams) {
