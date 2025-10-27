@@ -3,6 +3,9 @@ const API_KEYS = Deno.env.toObject().GEMINI_API_KEYS?.split(',')?.map(key => key
 const DEFAULT_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 const ACCESS_TOKEN = Deno.env.get('ACCESS_TOKEN');
 
+// Initialize Deno KV
+const kv = await Deno.openKv();
+
 // Constants for rate limiting and backoff
 // Gemini 2.5 Pro Free Tier Limits:
 // RPM: 5 (Request Per Minute)
@@ -29,6 +32,38 @@ interface KeyState {
   failureCount: number;               // Consecutive failures for exponential backoff
 }
 
+// KV helper functions
+async function getKeyState(key: string): Promise<KeyState> {
+  const result = await kv.get<KeyState>(["keyState", key]);
+  if (result.value) {
+    return result.value;
+  }
+  // Return default state if not found
+  return {
+    requestTimestampsMinute: [],
+    requestCountDay: 0,
+    lastDailyReset: Date.now(),
+    activeRequests: 0,
+    blocked: false,
+    blockUntil: 0,
+    failureCount: 0,
+  };
+}
+
+async function setKeyState(key: string, state: KeyState): Promise<void> {
+  await kv.set(["keyState", key], state);
+}
+
+async function getAuthAttempts(ip: string): Promise<number[]> {
+  const result = await kv.get<number[]>(["authAttempts", ip]);
+  return result.value || [];
+}
+
+async function setAuthAttempts(ip: string, attempts: number[]): Promise<void> {
+  // Set with expiration of 2 minutes
+  await kv.set(["authAttempts", ip], attempts, { expireIn: 2 * 60 * 1000 });
+}
+
 // Check if daily reset should occur (midnight Pacific has passed)
 function shouldResetDaily(lastReset: number): boolean {
   const now = new Date();
@@ -40,22 +75,6 @@ function shouldResetDaily(lastReset: number): boolean {
          pacificNow.getMonth() !== lastResetPacific.getMonth() ||
          pacificNow.getFullYear() !== lastResetPacific.getFullYear();
 }
-
-const KEYS_STATES = API_KEYS.reduce((acc, key) => {
-  acc[key] = {
-    requestTimestampsMinute: [],
-    requestCountDay: 0,
-    lastDailyReset: Date.now(),
-    activeRequests: 0,
-    blocked: false,
-    blockUntil: 0,
-    failureCount: 0,
-  };
-  return acc;
-}, {} as Record<string, KeyState>);
-
-// Auth rate limiting (IP -> failed attempt timestamps)
-const authAttempts = new Map<string, number[]>();
 
 // Logging helper
 function log(level: 'info' | 'warn' | 'error', message: string, meta?: Record<string, unknown>) {
@@ -71,14 +90,17 @@ function cleanSlidingWindow(timestamps: number[], windowMs: number): number[] {
 }
 
 // Weighted round-robin with sliding window and concurrency limits
-function getKey(): string | null {
+async function getKey(): Promise<string | null> {
   const now = Date.now();
   
   // First pass: unblock keys if their block period has expired
-  for (const [key, state] of Object.entries(KEYS_STATES)) {
+  for (const key of API_KEYS) {
+    const state = await getKeyState(key);
+    
     if (state.blocked && now >= state.blockUntil) {
       state.blocked = false;
       state.failureCount = 0;
+      await setKeyState(key, state);
       log('info', `Key unblocked after backoff period`, { key: key.slice(0, 5) });
     }
     // Clean old timestamps for minute window
@@ -90,42 +112,49 @@ function getKey(): string | null {
       state.lastDailyReset = now;
       log('info', `Daily quota reset at midnight Pacific`, { key: key.slice(0, 5) });
     }
+    
+    await setKeyState(key, state);
   }
 
   // Find available keys (not blocked, under all limits)
-  const availableKeys = API_KEYS.filter(key => {
-    const state = KEYS_STATES[key];
-    return !state.blocked && 
-           state.activeRequests < MAX_CONCURRENT_PER_KEY &&
-           state.requestTimestampsMinute.length < RPM_LIMIT &&
-           state.requestCountDay < RPD_LIMIT;
-  });
+  const availableKeys: string[] = [];
+  for (const key of API_KEYS) {
+    const state = await getKeyState(key);
+    if (!state.blocked && 
+        state.activeRequests < MAX_CONCURRENT_PER_KEY &&
+        state.requestTimestampsMinute.length < RPM_LIMIT &&
+        state.requestCountDay < RPD_LIMIT) {
+      availableKeys.push(key);
+    }
+  }
 
   if (availableKeys.length === 0) {
     return null;
   }
 
   // Weighted selection: prefer keys with fewer requests in the day
-  availableKeys.sort((a, b) => {
-    const stateA = KEYS_STATES[a];
-    const stateB = KEYS_STATES[b];
+  const keyStates = await Promise.all(
+    availableKeys.map(async (key) => ({ key, state: await getKeyState(key) }))
+  );
+  
+  keyStates.sort((a, b) => {
     // Primary: fewer requests in day
-    if (stateA.requestCountDay !== stateB.requestCountDay) {
-      return stateA.requestCountDay - stateB.requestCountDay;
+    if (a.state.requestCountDay !== b.state.requestCountDay) {
+      return a.state.requestCountDay - b.state.requestCountDay;
     }
     // Secondary: fewer requests in minute window
-    if (stateA.requestTimestampsMinute.length !== stateB.requestTimestampsMinute.length) {
-      return stateA.requestTimestampsMinute.length - stateB.requestTimestampsMinute.length;
+    if (a.state.requestTimestampsMinute.length !== b.state.requestTimestampsMinute.length) {
+      return a.state.requestTimestampsMinute.length - b.state.requestTimestampsMinute.length;
     }
     // Tertiary: fewer active concurrent requests
-    return stateA.activeRequests - stateB.activeRequests;
+    return a.state.activeRequests - b.state.activeRequests;
   });
 
-  return availableKeys[0];
+  return keyStates[0].key;
 }
 
 // Validate access token with rate limiting
-function validateAccessToken(provided: string | null, clientIp: string): { valid: boolean; rateLimited: boolean } {
+async function validateAccessToken(provided: string | null, clientIp: string): Promise<{ valid: boolean; rateLimited: boolean }> {
   // If no ACCESS_TOKEN is set, allow all
   if (!ACCESS_TOKEN) {
     return { valid: true, rateLimited: false };
@@ -138,10 +167,10 @@ function validateAccessToken(provided: string | null, clientIp: string): { valid
 
   // Failed attempt - track for rate limiting
   const now = Date.now();
-  const attempts = authAttempts.get(clientIp) || [];
+  const attempts = await getAuthAttempts(clientIp);
   const recentAttempts = cleanSlidingWindow(attempts, AUTH_WINDOW_MS);
   recentAttempts.push(now);
-  authAttempts.set(clientIp, recentAttempts);
+  await setAuthAttempts(clientIp, recentAttempts);
 
   // Check if rate limited
   if (recentAttempts.length > MAX_AUTH_ATTEMPTS) {
@@ -153,22 +182,28 @@ function validateAccessToken(provided: string | null, clientIp: string): { valid
 }
 
 // Display key states with sliding window counts
-function printKeyStates() {
+async function printKeyStates(): Promise<string> {
   if (API_KEYS.length === 0) {
     return '⚠️ NO API KEYS CONFIGURED - Please set API_KEYS environment variable';
   }
   
-  return Object.entries(KEYS_STATES).map(([key, state]) => {
-    const requestsPerMinute = state.requestTimestampsMinute.length;
-    const requestsPerDay = state.requestCountDay;
-    const blockStatus = state.blocked ? `BLOCKED until ${new Date(state.blockUntil).toLocaleTimeString()}` : 'ACTIVE';
-    return `${key.slice(0, 7)}... -> [RPM: ${requestsPerMinute}/${RPM_LIMIT}, RPD: ${requestsPerDay}/${RPD_LIMIT}, active: ${state.activeRequests}/${MAX_CONCURRENT_PER_KEY}, status: ${blockStatus}]`;
-  }).join('\n');
+  const states = await Promise.all(
+    API_KEYS.map(async (key) => {
+      const state = await getKeyState(key);
+      const requestsPerMinute = state.requestTimestampsMinute.length;
+      const requestsPerDay = state.requestCountDay;
+      const blockStatus = state.blocked ? `BLOCKED until ${new Date(state.blockUntil).toLocaleTimeString()}` : 'ACTIVE';
+      return `${key.slice(0, 7)}... -> [RPM: ${requestsPerMinute}/${RPM_LIMIT}, RPD: ${requestsPerDay}/${RPD_LIMIT}, active: ${state.activeRequests}/${MAX_CONCURRENT_PER_KEY}, status: ${blockStatus}]`;
+    })
+  );
+  
+  return states.join('\n');
 }
 
 // HTML response with optional error message
-function printHomeHtml(message?: string) {
+async function printHomeHtml(message?: string): Promise<string> {
   const hasKeys = API_KEYS.length > 0;
+  const keyStates = await printKeyStates();
   return `
   <!DOCTYPE html>
   <html lang="en">
@@ -190,7 +225,7 @@ function printHomeHtml(message?: string) {
     ${!hasKeys ? '<div class="warning">⚠️ WARNING: No API keys configured! Set API_KEYS environment variable.</div>' : ''}
     <div class="status">
       <h2>Key Status:</h2>
-      <pre>${printKeyStates()}</pre>
+      <pre>${keyStates}</pre>
     </div>
     ${message ? `<p class="error">${message}</p>` : ''}
     <div>
@@ -250,8 +285,9 @@ async function sendRequestWithKey(req: Request, key: string): Promise<Response> 
     fHeaders.set('content-type', req.headers.get('content-type')!);
   }
   
-  const state = KEYS_STATES[key];
+  const state = await getKeyState(key);
   state.activeRequests++;
+  await setKeyState(key, state);
   
   try {
     const response = await fetch(targetUrl.toString(), {
@@ -261,13 +297,15 @@ async function sendRequestWithKey(req: Request, key: string): Promise<Response> 
     });
     return response;
   } finally {
-    state.activeRequests--;
+    const updatedState = await getKeyState(key);
+    updatedState.activeRequests--;
+    await setKeyState(key, updatedState);
   }
 }
 
 // Block a key with exponential backoff
-function blockKey(key: string, errorCode: number) {
-  const state = KEYS_STATES[key];
+async function blockKey(key: string, errorCode: number): Promise<void> {
+  const state = await getKeyState(key);
   state.blocked = true;
   state.failureCount++;
   
@@ -275,6 +313,8 @@ function blockKey(key: string, errorCode: number) {
   const backoffIndex = Math.min(state.failureCount - 1, BACKOFF_LEVELS.length - 1);
   const backoffDuration = BACKOFF_LEVELS[backoffIndex];
   state.blockUntil = Date.now() + backoffDuration;
+  
+  await setKeyState(key, state);
   
   log('warn', `Key blocked with exponential backoff`, {
     key: key.slice(0, 7),
@@ -305,7 +345,8 @@ Deno.serve(async (req) => {
   
   // Homepage - don't send to API
   if (url.pathname === '/' && req.method === 'GET') {
-    return new Response(printHomeHtml(), { 
+    const html = await printHomeHtml();
+    return new Response(html, { 
       status: 200, 
       headers: { 'Content-Type': 'text/html' } 
     });
@@ -316,7 +357,7 @@ Deno.serve(async (req) => {
   
   // Validate access token with rate limiting
   const accessToken = new URL(req.url).searchParams.get('key');
-  const authResult = validateAccessToken(accessToken, clientIp);
+  const authResult = await validateAccessToken(accessToken, clientIp);
   
   if (authResult.rateLimited) {
     const message = 'Too many failed authentication attempts. Please try again later.';
@@ -325,7 +366,8 @@ Deno.serve(async (req) => {
     if (preferJson) {
       return jsonErrorResponse(message, 429);
     }
-    return new Response(printHomeHtml(message), { 
+    const html = await printHomeHtml(message);
+    return new Response(html, { 
       status: 429, 
       headers: { 'Content-Type': 'text/html' } 
     });
@@ -338,14 +380,15 @@ Deno.serve(async (req) => {
     if (preferJson) {
       return jsonErrorResponse(message, 403);
     }
-    return new Response(printHomeHtml(message), { 
+    const html = await printHomeHtml(message);
+    return new Response(html, { 
       status: 403, 
       headers: { 'Content-Type': 'text/html' } 
     });
   }
 
   try {
-    const key = getKey();
+    const key = await getKey();
     if (!key) {
       const message = 'All API keys are currently blocked due to rate limits. Please try again later.';
       log('error', 'No available keys', { ip: clientIp });
@@ -353,7 +396,8 @@ Deno.serve(async (req) => {
       if (preferJson) {
         return jsonErrorResponse(message, 503);
       }
-      return new Response(printHomeHtml(message), { 
+      const html = await printHomeHtml(message);
+      return new Response(html, { 
         status: 503, 
         headers: { 'Content-Type': 'text/html' } 
       });
@@ -374,9 +418,9 @@ Deno.serve(async (req) => {
       });
       
       // Block the failed key with exponential backoff
-      blockKey(currentKey, response.status);
+      await blockKey(currentKey, response.status);
       
-      const nextKey = getKey();
+      const nextKey = await getKey();
       if (!nextKey) {
         log('warn', 'No more keys available for retry', { attempts });
         break;
@@ -396,17 +440,19 @@ Deno.serve(async (req) => {
       if (preferJson) {
         return jsonErrorResponse(message, 503);
       }
-      return new Response(printHomeHtml(message), { 
+      const html = await printHomeHtml(message);
+      return new Response(html, { 
         status: 503, 
         headers: { 'Content-Type': 'text/html' } 
       });
     }
 
     // Success - track the request in minute window and increment daily counter
-    const state = KEYS_STATES[currentKey];
+    const state = await getKeyState(currentKey);
     const now = Date.now();
     state.requestTimestampsMinute.push(now);
     state.requestCountDay++;
+    await setKeyState(currentKey, state);
     
     log('info', 'Request successful', {
       key: currentKey.slice(0, 7),
@@ -427,7 +473,8 @@ Deno.serve(async (req) => {
     if (preferJson) {
       return jsonErrorResponse(message, 500);
     }
-    return new Response(printHomeHtml(message), { 
+    const html = await printHomeHtml(message);
+    return new Response(html, { 
       status: 500, 
       headers: { 'Content-Type': 'text/html' } 
     });
